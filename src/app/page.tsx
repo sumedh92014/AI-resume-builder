@@ -117,6 +117,44 @@ const shorteners = [
   { from: /\bthat\b/gi, to: "" },
 ];
 
+const monthMap: Record<string, string> = {
+  jan: "January",
+  january: "January",
+  feb: "February",
+  february: "February",
+  mar: "March",
+  march: "March",
+  apr: "April",
+  april: "April",
+  may: "May",
+  jun: "June",
+  june: "June",
+  jul: "July",
+  july: "July",
+  aug: "August",
+  august: "August",
+  sep: "September",
+  sept: "September",
+  september: "September",
+  oct: "October",
+  october: "October",
+  nov: "November",
+  november: "November",
+  dec: "December",
+  december: "December",
+};
+
+function capitalizeFirstLetter(text: string) {
+  const t = text.trim();
+  if (!t) return "";
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+function normalizeMonth(text: string) {
+  const key = text.trim().toLowerCase();
+  return monthMap[key] || capitalizeFirstLetter(text);
+}
+
 function stripHtml(html: string) {
   return html.replace(/<[^>]*>/g, "");
 }
@@ -136,6 +174,8 @@ export default function Home() {
   const [draggingSectionId, setDraggingSectionId] = useState<SectionId | null>(null);
   const [customSectionName, setCustomSectionName] = useState("");
   const [saveMessage, setSaveMessage] = useState("");
+  const [previewScale, setPreviewScale] = useState(1);
+  const [sectionHeaderColor, setSectionHeaderColor] = useState("#000000");
   const previewRef = useRef<HTMLDivElement | null>(null);
   const bulletRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
@@ -302,6 +342,28 @@ export default function Home() {
       getEntries(sectionId).map((entry) => (entry.id === entryId ? { ...entry, [field]: value } : entry)),
     );
 
+  const normalizeEntryField = (
+    sectionId: ContentSectionId,
+    entryId: string,
+    field: keyof ResumeEntry,
+  ) => {
+    const entry = getEntries(sectionId).find((item) => item.id === entryId);
+    if (!entry) return;
+    const raw = String(entry[field] || "");
+    let next = raw;
+    if (field === "startMonth" || field === "endMonth") {
+      next = normalizeMonth(raw);
+    } else if (
+      field === "title" ||
+      field === "organization" ||
+      field === "startDate" ||
+      field === "endDate"
+    ) {
+      next = capitalizeFirstLetter(raw);
+    }
+    if (next !== raw) updateEntry(sectionId, entryId, field, next);
+  };
+
   const updateBullet = (
     sectionId: ContentSectionId,
     entryId: string,
@@ -317,6 +379,21 @@ export default function Home() {
         return { ...entry, bullets };
       }),
     );
+
+  const normalizeBullet = (
+    sectionId: ContentSectionId,
+    entryId: string,
+    bulletIndex: number,
+  ) => {
+    const entry = getEntries(sectionId).find((item) => item.id === entryId);
+    if (!entry) return;
+    const current = entry.bullets[bulletIndex] || "";
+    const plain = stripHtml(current);
+    const normalized = capitalizeFirstLetter(plain);
+    if (normalized && normalized !== plain) {
+      updateBullet(sectionId, entryId, bulletIndex, normalized);
+    }
+  };
 
   const addBullet = (sectionId: ContentSectionId, entryId: string) =>
     setEntries(
@@ -438,7 +515,7 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-zinc-100 text-zinc-900">
       <header className="print-hidden sticky top-0 z-20 border-b border-zinc-200 bg-white/95 shadow-sm backdrop-blur">
-        <div className="mx-auto flex max-w-[1520px] items-center justify-between px-5 py-3">
+        <div className="mx-auto flex w-full max-w-[1880px] items-center justify-between px-3 py-3">
           <div>
             <h1 className="text-base font-semibold tracking-tight">One-Page ATS Resume Builder</h1>
             <p className="text-xs text-zinc-500">Single template. One page. Recruiter-ready.</p>
@@ -465,6 +542,32 @@ export default function Home() {
             >
               Run Export Checks
             </button>
+            <label className="ml-1 flex items-center gap-2 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-xs text-zinc-600">
+              Header Color
+              <input
+                type="color"
+                value={sectionHeaderColor}
+                onChange={(e) => setSectionHeaderColor(e.target.value)}
+                className="h-5 w-7 cursor-pointer border-0 bg-transparent p-0"
+              />
+            </label>
+            <div className="ml-1 flex items-center gap-1 rounded-md border border-zinc-300 bg-white p-1">
+              <button
+                className="rounded px-2 py-1 text-xs font-semibold hover:bg-zinc-100"
+                onClick={() => setPreviewScale((prev) => Math.max(0.8, Number((prev - 0.05).toFixed(2))))}
+              >
+                -
+              </button>
+              <span className="px-1 text-[11px] text-zinc-600">
+                {Math.round(previewScale * 100)}%
+              </span>
+              <button
+                className="rounded px-2 py-1 text-xs font-semibold hover:bg-zinc-100"
+                onClick={() => setPreviewScale((prev) => Math.min(1.35, Number((prev + 0.05).toFixed(2))))}
+              >
+                +
+              </button>
+            </div>
             <button
               className="rounded-md bg-black px-3 py-2 text-xs font-medium text-white hover:bg-zinc-800"
               onClick={exportToPdf}
@@ -474,19 +577,19 @@ export default function Home() {
           </div>
         </div>
         {guardrailMessage ? (
-          <div className="mx-auto max-w-[1520px] border-t border-zinc-200 bg-zinc-50 px-5 py-2 text-xs text-zinc-700">
+          <div className="mx-auto w-full max-w-[1880px] border-t border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-700">
             {guardrailMessage}
           </div>
         ) : null}
         {saveMessage ? (
-          <div className="mx-auto max-w-[1520px] border-t border-zinc-200 bg-zinc-50 px-5 py-2 text-xs text-zinc-700">
+          <div className="mx-auto w-full max-w-[1880px] border-t border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-700">
             {saveMessage}
           </div>
         ) : null}
       </header>
 
-      <main className="print-root mx-auto grid max-w-[1520px] gap-4 px-5 py-4 lg:grid-cols-[300px_minmax(460px,1fr)_minmax(460px,1fr)]">
-        <aside className="print-hidden h-[calc(100vh-100px)] overflow-auto rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
+      <main className="print-root mx-auto grid w-full max-w-[1880px] gap-3 px-3 py-4 lg:grid-cols-[300px_minmax(520px,1fr)_minmax(560px,1fr)]">
+        <aside className="print-hidden h-[calc(100vh-100px)] w-[300px] min-w-[300px] max-w-[300px] overflow-auto rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
           <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">Section Manager</h2>
           <div className="space-y-2">
             {sections.map((section) => (
@@ -601,8 +704,8 @@ export default function Home() {
                     {entries.map((entry) => (
                       <div key={entry.id} className="rounded-lg border border-zinc-200 bg-zinc-50/40 p-3 shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
                         <div className="mb-2 grid gap-2 md:grid-cols-2">
-                          <input className="rounded-md border border-zinc-300 px-3 py-2 text-sm" placeholder="Title / Role / Degree" value={entry.title} onChange={(e) => updateEntry(section.id, entry.id, "title", e.target.value)} />
-                          <input className="rounded-md border border-zinc-300 px-3 py-2 text-sm" placeholder="Organization" value={entry.organization} onChange={(e) => updateEntry(section.id, entry.id, "organization", e.target.value)} />
+                          <input className="rounded-md border border-zinc-300 px-3 py-2 text-sm" placeholder="Title / Role / Degree" value={entry.title} onChange={(e) => updateEntry(section.id, entry.id, "title", e.target.value)} onBlur={() => normalizeEntryField(section.id, entry.id, "title")} />
+                          <input className="rounded-md border border-zinc-300 px-3 py-2 text-sm" placeholder="Organization" value={entry.organization} onChange={(e) => updateEntry(section.id, entry.id, "organization", e.target.value)} onBlur={() => normalizeEntryField(section.id, entry.id, "organization")} />
                           {section.id !== "workExperience" ? (
                             <>
                               <input className="rounded-md border border-zinc-300 px-3 py-2 text-sm" placeholder="Start Date" value={entry.startDate} onChange={(e) => updateEntry(section.id, entry.id, "startDate", e.target.value)} />
@@ -637,6 +740,7 @@ export default function Home() {
                               onChange={(e) =>
                                 updateEntry(section.id, entry.id, "startMonth", e.target.value)
                               }
+                              onBlur={() => normalizeEntryField(section.id, entry.id, "startMonth")}
                             />
                             <input
                               className="rounded-md border border-zinc-300 px-3 py-2 text-sm"
@@ -653,6 +757,7 @@ export default function Home() {
                               onChange={(e) =>
                                 updateEntry(section.id, entry.id, "endMonth", e.target.value)
                               }
+                              onBlur={() => normalizeEntryField(section.id, entry.id, "endMonth")}
                             />
                             <input
                               className="rounded-md border border-zinc-300 px-3 py-2 text-sm"
@@ -718,6 +823,7 @@ export default function Home() {
                                   normalizeBulletHtml(e.currentTarget.innerHTML),
                                 )
                               }
+                              onBlur={() => normalizeBullet(section.id, entry.id, index)}
                               onKeyDown={(e) => {
                                 if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b") {
                                   e.preventDefault();
@@ -751,21 +857,22 @@ export default function Home() {
           <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">Live Resume Preview</h2>
           <div
             ref={previewRef}
-            className="print-preview-wrap mx-auto h-[842px] w-full max-w-[595px] overflow-hidden rounded-sm border border-zinc-300 bg-white px-8 py-7 shadow-[0_8px_30px_rgba(0,0,0,0.08)]"
+            className="print-preview-wrap mx-auto h-[842px] w-full overflow-hidden rounded-sm border border-zinc-300 bg-white px-8 py-7 shadow-[0_8px_30px_rgba(0,0,0,0.08)]"
+            style={{ maxWidth: `${Math.round(595 * previewScale)}px` }}
           >
             <div className="pb-2">
-              <h1 className="text-[34px] font-semibold leading-tight text-black">{resume.header.fullName}</h1>
+              <h1 className="text-[34px] font-semibold leading-tight" style={{ color: sectionHeaderColor }}>{resume.header.fullName}</h1>
               <div className="mt-3 h-[2px] w-full bg-black" />
               <p className="mt-2 truncate text-[10px] leading-[1.3] text-zinc-800">{resume.header.email} | {resume.header.phone} | {resume.header.linkedin}{resume.header.location ? ` | ${resume.header.location}` : ""}</p>
             </div>
             <div className="mt-3 space-y-3 text-[10px] leading-[1.32]">
               {enabledSections.map((section) => {
-                if (section.id === "skills") return <div key={section.id}><h3 className="border-b border-zinc-300 pb-0.5 text-[11px] font-bold uppercase tracking-wide">Skills</h3><p className="mt-1">{resume.skills}</p></div>;
+                if (section.id === "skills") return <div key={section.id}><h3 className="border-b border-zinc-300 pb-0.5 text-[11px] font-bold uppercase tracking-wide" style={{ color: sectionHeaderColor }}>Skills</h3><p className="mt-1">{resume.skills}</p></div>;
                 const entries = getEntries(section.id as ContentSectionId);
                 if (entries.length === 0) return null;
                 return (
                   <div key={section.id}>
-                    <h3 className="border-b border-zinc-300 pb-0.5 text-[11px] font-bold uppercase tracking-wide">{section.label}</h3>
+                    <h3 className="border-b border-zinc-300 pb-0.5 text-[11px] font-bold uppercase tracking-wide" style={{ color: sectionHeaderColor }}>{section.label}</h3>
                     <div className="mt-1.5 space-y-2">
                       {entries.map((entry) => (
                         <div key={entry.id}>
