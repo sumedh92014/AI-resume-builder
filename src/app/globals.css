@@ -24,3 +24,51 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+@media print {
+  @page {
+    size: A4;
+    margin: 6mm;
+  }
+
+  body {
+    background: #fff !important;
+    color: #000 !important;
+  }
+
+  .print-hidden {
+    display: none !important;
+  }
+
+  body.printing-resume .print-root * {
+    visibility: hidden !important;
+  }
+
+  body.printing-resume .print-only-resume,
+  body.printing-resume .print-only-resume * {
+    visibility: visible !important;
+  }
+
+  body.printing-resume .print-only-resume {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    border: none !important;
+    box-shadow: none !important;
+    height: auto !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  body.printing-resume .print-preview-wrap {
+    max-width: none !important;
+    width: 100% !important;
+    height: auto !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 6mm 6mm 4mm 6mm !important;
+    margin: 0 !important;
+  }
+}
