@@ -219,6 +219,7 @@ export default function Home() {
   const [saveMessage, setSaveMessage] = useState("");
   const [previewScale, setPreviewScale] = useState(1);
   const [sectionHeaderColor, setSectionHeaderColor] = useState("#000000");
+  const [mounted, setMounted] = useState(false);
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(
     () => loadDraftFromStorage().collapsedSections,
   );
@@ -243,6 +244,10 @@ export default function Home() {
       setResume((prev) => ({ ...prev, [sectionId as BaseContentSectionId]: entries }));
     }
   };
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ sections, resume, collapsedSections }));
@@ -312,11 +317,38 @@ export default function Home() {
     .filter((item) => item.score > 0);
 
   const toggleSection = (sectionId: SectionId) =>
-    setSections((prev) =>
-      prev.map((section) =>
+    setSections((prev) => {
+      const target = prev.find((section) => section.id === sectionId);
+      const nextEnabled = target ? !target.enabled : true;
+
+      if (nextEnabled && sectionId !== "skills") {
+        setResume((prevResume) => {
+          if (sectionId.startsWith("custom-")) {
+            const existing = prevResume.customSections[sectionId] || [];
+            if (existing.length > 0) return prevResume;
+            return {
+              ...prevResume,
+              customSections: {
+                ...prevResume.customSections,
+                [sectionId]: [emptyEntry(`${sectionId}-${Date.now()}`)],
+              },
+            };
+          }
+
+          const key = sectionId as BaseContentSectionId;
+          const existing = prevResume[key];
+          if (existing.length > 0) return prevResume;
+          return {
+            ...prevResume,
+            [key]: [emptyEntry(`${key}-${Date.now()}`)],
+          };
+        });
+      }
+
+      return prev.map((section) =>
         section.id === sectionId ? { ...section, enabled: !section.enabled } : section,
-      ),
-    );
+      );
+    });
 
   const moveSectionById = (draggedId: SectionId, targetId: SectionId) => {
     if (draggedId === targetId) return;
@@ -531,11 +563,19 @@ export default function Home() {
       const response = await fetch("/api/ai/bullets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ section: sectionId, roleOrTitle: entry.title, organization: entry.organization, roughNotes }),
+        body: JSON.stringify({
+	 section: sectionId, 
+	 roleOrTitle: entry.title,
+	 organization: entry.organization,
+	 roughNotes,
+	 }),
       });
       if (!response.ok) throw new Error();
-      const data = (await response.json()) as BulletApiResult;
-      setAiStateByEntry((prev) => ({ ...prev, [entry.id]: { loading: false, result: data } }));
+const data = (await response.json()) as BulletApiResult;
+ setAiStateByEntry((prev) => ({ 
+...prev,
+ [entry.id]: { loading: false, result: data }
+ }));
     } catch {
       setAiStateByEntry((prev) => ({ ...prev, [entry.id]: { loading: false, error: "Could not generate bullets. Please try again." } }));
     }
@@ -567,6 +607,30 @@ export default function Home() {
   };
 
   const getAddEntryLabel = (sectionLabel: string) => `Add Another ${sectionLabel.replace(" / ", " ")}`;
+
+  const getCollapsedSummary = (section: ContentSectionConfig, entries: ResumeEntry[]) => {
+    const entryCount = entries.length;
+    const bulletCount = entries.reduce(
+      (total, entry) => total + entry.bullets.filter((b) => stripHtml(b).trim().length > 0).length,
+      0,
+    );
+
+    if (section.id === "education") {
+      return `${entryCount} education entr${entryCount === 1 ? "y" : "ies"} and ${bulletCount} bullet point${bulletCount === 1 ? "" : "s"}.`;
+    }
+    if (section.id === "workExperience") {
+      return `${entryCount} compan${entryCount === 1 ? "y" : "ies"} and ${bulletCount} bullet point${bulletCount === 1 ? "" : "s"}.`;
+    }
+    if (section.id === "internships") {
+      return `${entryCount} internship entr${entryCount === 1 ? "y" : "ies"} and ${bulletCount} bullet point${bulletCount === 1 ? "" : "s"}.`;
+    }
+    if (section.id === "projects") {
+      return `${entryCount} project${entryCount === 1 ? "" : "s"} and ${bulletCount} bullet point${bulletCount === 1 ? "" : "s"}.`;
+    }
+    return `${entryCount} entr${entryCount === 1 ? "y" : "ies"} and ${bulletCount} bullet point${bulletCount === 1 ? "" : "s"}.`;
+  };
+
+  if (!mounted) return null;
 
   return (
     <div className="min-h-screen bg-zinc-100 text-zinc-900">
@@ -766,7 +830,7 @@ export default function Home() {
                   </div>
                   {collapsedSections[section.id] ? (
                     <div className="rounded-md border border-dashed border-zinc-300 bg-zinc-50 px-3 py-2 text-xs text-zinc-600">
-                      {section.label} collapsed. Click Expand to edit.
+                      {getCollapsedSummary(section, entries)}
                     </div>
                   ) : (
                     <div className="space-y-4">
@@ -949,7 +1013,23 @@ export default function Home() {
             <div className="pb-2">
               <h1 className="text-[34px] font-semibold leading-tight" style={{ color: sectionHeaderColor }}>{resume.header.fullName}</h1>
               <div className="mt-3 h-[2px] w-full bg-black" />
-              <p className="mt-2 truncate text-[10px] leading-[1.3] text-zinc-800">{resume.header.email} | {resume.header.phone} | {resume.header.linkedin}{resume.header.location ? ` | ${resume.header.location}` : ""}</p>
+              <p className="mt-2 truncate text-[10px] leading-[1.3] text-zinc-800">
+                {resume.header.email} | {resume.header.phone}
+                {resume.header.linkedin ? (
+                  <>
+                    {" | "}
+                    <a
+                      href={resume.header.linkedin}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="underline"
+                    >
+                      LinkedIn
+                    </a>
+                  </>
+                ) : null}
+                {resume.header.location ? ` | ${resume.header.location}` : ""}
+              </p>
             </div>
             <div className="mt-3 space-y-3 text-[10px] leading-[1.32]">
               {enabledSections.map((section) => {

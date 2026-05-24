@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 type BulletResponse = {
   bestBullet: string;
@@ -48,7 +49,13 @@ function fallbackRewrite(input: RewriteInput): BulletResponse {
 
 function parseJsonObject(text: string): BulletResponse | null {
   try {
-    const parsed = JSON.parse(text) as Partial<BulletResponse>;
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start === -1 || end === -1) return null;
+
+    const raw = text.slice(start, end + 1);
+    const parsed = JSON.parse(raw) as Partial<BulletResponse>;
+
     if (
       typeof parsed.bestBullet === "string" &&
       typeof parsed.shorterBullet === "string" &&
@@ -70,30 +77,18 @@ function parseJsonObject(text: string): BulletResponse | null {
   }
 }
 
-export async function POST(req: Request) {
-  const body = (await req.json()) as RewriteInput;
-  const roughNotes = (body.roughNotes || "").trim();
+function buildPrompt(body: RewriteInput, roughNotes: string) {
+  return `
+You are an expert ATS resume bullet writer.
 
-  if (!roughNotes) {
-    return NextResponse.json(
-      { error: "roughNotes is required." },
-      { status: 400 },
-    );
-  }
-
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json(fallbackRewrite(body));
-  }
-
-  const prompt = `
-You rewrite resume content for ATS-friendly one-page resumes.
-Rules:
-- Use only facts provided by the user.
-- Never invent metrics, tools, company names, or achievements.
-- Use strong action verbs.
-- Keep each bullet concise.
-- Return strict JSON only.
+Rules (must follow):
+- Use only the facts provided by the user.
+- Do NOT invent metrics, tools, company names, achievements, or scope.
+- Keep each bullet concise (1–2 lines).
+- Start with a strong action verb.
+- Use professional, recruiter-friendly language.
+- If metrics are missing, ask up to 3 optional metric questions.
+- Return strict JSON only. No markdown. No explanations.
 
 Input:
 Section: ${body.section || ""}
@@ -101,39 +96,60 @@ Role/Title: ${body.roleOrTitle || ""}
 Organization: ${body.organization || ""}
 Rough Notes: ${roughNotes}
 
-Return JSON with:
+Output JSON:
 {
   "bestBullet": "string",
   "shorterBullet": "string",
   "impactBullet": "string",
   "metricQuestions": ["string"]
 }
-If metrics are missing, add 1-3 optional metric questions.
 `;
+}
+
+export async function POST(req: Request) {
+  const body = (await req.json()) as RewriteInput;
+  const roughNotes = (body.roughNotes || "").trim();
+
+  if (!roughNotes) {
+    return NextResponse.json({ error: "roughNotes is required." }, { status: 400 });
+  }
+
+  if (roughNotes.length > 1200) {
+    return NextResponse.json(
+      { error: "roughNotes is too long. Keep it under 1200 characters." },
+      { status: 400 },
+    );
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return NextResponse.json(fallbackRewrite(body));
+  }
 
   try {
-    const response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4.1-mini",
-        input: prompt,
-      }),
-    });
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
-    if (!response.ok) {
-      return NextResponse.json(fallbackRewrite(body));
+    const prompt = buildPrompt(body, roughNotes);
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
+
+    let parsed = parseJsonObject(text);
+
+    if (!parsed) {
+      const retryPrompt = `${prompt}\n\nIMPORTANT: Return ONLY valid JSON object. No markdown, no backticks, no extra text.`;
+      const retryResult = await model.generateContent(retryPrompt);
+      const retryText = retryResult.response.text();
+      parsed = parseJsonObject(retryText);
     }
 
-    const data = (await response.json()) as {
-      output_text?: string;
-    };
-    const parsed = parseJsonObject(data.output_text || "");
-    return NextResponse.json(parsed || fallbackRewrite(body));
-  } catch {
+    if (parsed) {
+      return NextResponse.json(parsed);
+    }
+
+    return NextResponse.json(fallbackRewrite(body));
+  } catch (error) {
+    console.error("Gemini error:", error);
     return NextResponse.json(fallbackRewrite(body));
   }
 }
