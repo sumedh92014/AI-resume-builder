@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type BaseSectionId =
   | "education"
@@ -13,7 +13,8 @@ type BaseSectionId =
   | "awards"
   | "extracurriculars";
 type SectionId = BaseSectionId | `custom-${string}`;
-type ContentSectionId = Exclude<BaseSectionId, "skills"> | `custom-${string}`;
+type BaseContentSectionId = Exclude<BaseSectionId, "skills">;
+type ContentSectionId = BaseContentSectionId | `custom-${string}`;
 
 type SectionConfig = { id: SectionId; label: string; enabled: boolean };
 type ContentSectionConfig = Omit<SectionConfig, "id"> & { id: ContentSectionId };
@@ -106,6 +107,48 @@ const initialResume: ResumeState = {
   customSections: {},
 };
 
+type StoredDraft = {
+  sections: SectionConfig[];
+  resume: ResumeState;
+  collapsedSections: Record<string, boolean>;
+};
+
+function loadDraftFromStorage(): StoredDraft {
+  if (typeof window === "undefined") {
+    return {
+      sections: initialSections,
+      resume: initialResume,
+      collapsedSections: {},
+    };
+  }
+
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (!saved) {
+    return {
+      sections: initialSections,
+      resume: initialResume,
+      collapsedSections: {},
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(saved) as Partial<StoredDraft>;
+    return {
+      sections: parsed.sections || initialSections,
+      resume: parsed.resume
+        ? { ...parsed.resume, customSections: parsed.resume.customSections || {} }
+        : initialResume,
+      collapsedSections: parsed.collapsedSections || {},
+    };
+  } catch {
+    return {
+      sections: initialSections,
+      resume: initialResume,
+      collapsedSections: {},
+    };
+  }
+}
+
 const shorteners = [
   { from: /\bresponsible for\b/gi, to: "led" },
   { from: /\bin order to\b/gi, to: "to" },
@@ -167,8 +210,8 @@ function compressBulletText(bullet: string) {
 }
 
 export default function Home() {
-  const [sections, setSections] = useState(initialSections);
-  const [resume, setResume] = useState(initialResume);
+  const [sections, setSections] = useState<SectionConfig[]>(() => loadDraftFromStorage().sections);
+  const [resume, setResume] = useState<ResumeState>(() => loadDraftFromStorage().resume);
   const [aiStateByEntry, setAiStateByEntry] = useState<Record<string, AiEntryState>>({});
   const [guardrailMessage, setGuardrailMessage] = useState("");
   const [draggingSectionId, setDraggingSectionId] = useState<SectionId | null>(null);
@@ -176,11 +219,19 @@ export default function Home() {
   const [saveMessage, setSaveMessage] = useState("");
   const [previewScale, setPreviewScale] = useState(1);
   const [sectionHeaderColor, setSectionHeaderColor] = useState("#000000");
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(
+    () => loadDraftFromStorage().collapsedSections,
+  );
   const previewRef = useRef<HTMLDivElement | null>(null);
   const bulletRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
-  const getEntries = (sectionId: ContentSectionId): ResumeEntry[] =>
-    sectionId.startsWith("custom-") ? resume.customSections[sectionId] || [] : resume[sectionId];
+  const getEntries = useCallback(
+    (sectionId: ContentSectionId): ResumeEntry[] =>
+      sectionId.startsWith("custom-")
+        ? resume.customSections[sectionId] || []
+        : resume[sectionId as BaseContentSectionId],
+    [resume],
+  );
 
   const setEntries = (sectionId: ContentSectionId, entries: ResumeEntry[]) => {
     if (sectionId.startsWith("custom-")) {
@@ -189,32 +240,25 @@ export default function Home() {
         customSections: { ...prev.customSections, [sectionId]: entries },
       }));
     } else {
-      setResume((prev) => ({ ...prev, [sectionId]: entries }));
+      setResume((prev) => ({ ...prev, [sectionId as BaseContentSectionId]: entries }));
     }
   };
 
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (!saved) return;
-    try {
-      const parsed = JSON.parse(saved) as { sections: SectionConfig[]; resume: ResumeState };
-      if (parsed.sections && parsed.resume) {
-        setSections(parsed.sections);
-        setResume({ ...parsed.resume, customSections: parsed.resume.customSections || {} });
-      }
-    } catch {
-      localStorage.removeItem(STORAGE_KEY);
-    }
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ sections, resume }));
-  }, [sections, resume]);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ sections, resume, collapsedSections }));
+  }, [sections, resume, collapsedSections]);
 
   const saveDraftNow = () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ sections, resume }));
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ sections, resume, collapsedSections }),
+    );
     const now = new Date();
     setSaveMessage(`Saved at ${now.toLocaleTimeString()}`);
+  };
+
+  const toggleSectionCollapse = (sectionId: SectionId) => {
+    setCollapsedSections((prev) => ({ ...prev, [sectionId]: !prev[sectionId] }));
   };
 
   const orderedContentSections = sections.filter(
@@ -239,7 +283,7 @@ export default function Home() {
       0,
     );
     return Math.min(140, base + sectionWeight + entryCount * 5 + bulletCount * 3);
-  }, [sections, resume, orderedContentSections]);
+  }, [sections, orderedContentSections, getEntries]);
 
   const fitStatus =
     fullness <= 100
@@ -300,6 +344,16 @@ export default function Home() {
   };
 
   const deleteSection = (sectionId: SectionId) => {
+    const sectionMeta = sections.find((section) => section.id === sectionId);
+    const label = sectionMeta?.label || "this section";
+    const isCustomSection = sectionId.startsWith("custom-");
+    const confirmed = window.confirm(
+      isCustomSection
+        ? `Delete "${label}" section and all its entries? This cannot be undone.`
+        : `Disable and clear "${label}" section content? This cannot be undone.`,
+    );
+    if (!confirmed) return;
+
     if (sectionId.startsWith("custom-")) {
       setSections((prev) => prev.filter((section) => section.id !== sectionId));
       setResume((prev) => {
@@ -512,16 +566,18 @@ export default function Home() {
     return `${entry.startDate || ""}${entry.startDate || entry.endDate ? " - " : ""}${entry.endDate || ""}`;
   };
 
+  const getAddEntryLabel = (sectionLabel: string) => `Add Another ${sectionLabel.replace(" / ", " ")}`;
+
   return (
     <div className="min-h-screen bg-zinc-100 text-zinc-900">
       <header className="print-hidden sticky top-0 z-20 border-b border-zinc-200 bg-white/95 shadow-sm backdrop-blur">
-        <div className="mx-auto flex w-full max-w-[1880px] items-center justify-between px-3 py-3">
-          <div>
-            <h1 className="text-base font-semibold tracking-tight">One-Page ATS Resume Builder</h1>
+        <div className="mx-auto flex w-full max-w-[1880px] flex-col gap-3 px-3 py-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="space-y-0.5">
+            <h1 className="text-lg font-semibold tracking-tight">One-Page ATS Resume Builder</h1>
             <p className="text-xs text-zinc-500">Single template. One page. Recruiter-ready.</p>
           </div>
-          <div className="flex items-center gap-2">
-            <span className={`rounded-md px-3 py-1 text-xs font-medium ${fitStatus.tone}`}>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`rounded-md px-3 py-1.5 text-xs font-semibold ${fitStatus.tone}`}>
               {fitStatus.label}: {fullness}%
             </span>
             <button
@@ -537,7 +593,7 @@ export default function Home() {
               Make It Fit
             </button>
             <button
-              className="rounded-md bg-zinc-900 px-3 py-2 text-xs font-medium text-white hover:bg-zinc-800"
+              className="rounded-md bg-zinc-900 px-3 py-2 text-xs font-semibold text-white hover:bg-zinc-800"
               onClick={runPreExportChecks}
             >
               Run Export Checks
@@ -569,7 +625,7 @@ export default function Home() {
               </button>
             </div>
             <button
-              className="rounded-md bg-black px-3 py-2 text-xs font-medium text-white hover:bg-zinc-800"
+              className="rounded-md bg-black px-3 py-2 text-xs font-semibold text-white hover:bg-zinc-800"
               onClick={exportToPdf}
             >
               Export PDF
@@ -589,7 +645,7 @@ export default function Home() {
       </header>
 
       <main className="print-root mx-auto grid w-full max-w-[1880px] gap-3 px-3 py-4 lg:grid-cols-[300px_minmax(520px,1fr)_minmax(560px,1fr)]">
-        <aside className="print-hidden h-[calc(100vh-100px)] w-[300px] min-w-[300px] max-w-[300px] overflow-auto rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
+        <aside className="print-hidden h-auto w-full overflow-auto rounded-lg border border-zinc-200 bg-white p-4 shadow-sm lg:h-[calc(100vh-100px)] lg:w-[300px] lg:min-w-[300px] lg:max-w-[300px]">
           <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">Section Manager</h2>
           <div className="space-y-2">
             {sections.map((section) => (
@@ -650,7 +706,7 @@ export default function Home() {
           </div>
         </aside>
 
-        <section className="print-hidden h-[calc(100vh-100px)] overflow-auto rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
+        <section className="print-hidden h-auto overflow-auto rounded-lg border border-zinc-200 bg-white p-4 shadow-sm lg:h-[calc(100vh-100px)]">
           <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">Input Editor</h2>
           {overflowPercent > 0 ? (
             <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-800">
@@ -691,18 +747,37 @@ export default function Home() {
               const aiEnabled = aiSupportedSections.includes(section.id as BaseSectionId);
               return (
                 <div key={section.id} className="border-b border-zinc-200 pb-4">
-                  <div className="mb-3 flex items-center justify-between">
-                    <h3 className="text-sm font-semibold">{section.label}</h3>
-                    <button
-                      className="rounded-md border border-zinc-300 px-2.5 py-1.5 text-xs font-medium hover:bg-zinc-50"
-                      onClick={() => addEntry(section.id)}
-                    >
-                      Add Entry
-                    </button>
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2">
+                    <h3 className="text-sm font-semibold text-zinc-900">{section.label}</h3>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        className="rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs font-medium hover:bg-zinc-100"
+                        onClick={() => toggleSectionCollapse(section.id)}
+                      >
+                        {collapsedSections[section.id] ? "Expand" : "Collapse"}
+                      </button>
+                      <button
+                        className="rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs font-medium hover:bg-zinc-100"
+                        onClick={() => addEntry(section.id)}
+                      >
+                        {getAddEntryLabel(section.label)}
+                      </button>
+                    </div>
                   </div>
-                  <div className="space-y-4">
-                    {entries.map((entry) => (
-                      <div key={entry.id} className="rounded-lg border border-zinc-200 bg-zinc-50/40 p-3 shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
+                  {collapsedSections[section.id] ? (
+                    <div className="rounded-md border border-dashed border-zinc-300 bg-zinc-50 px-3 py-2 text-xs text-zinc-600">
+                      {section.label} collapsed. Click Expand to edit.
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                    {entries.map((entry, entryIndex) => (
+                      <div key={entry.id} className="rounded-lg border border-zinc-300 bg-zinc-50/40 p-3 shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-1 rounded-md border border-zinc-200 bg-white px-2.5 py-1.5">
+                          <p className="text-xs font-semibold text-zinc-700">
+                            {section.label} #{entryIndex + 1}
+                          </p>
+                          <p className="text-[11px] text-zinc-500">Editing this block</p>
+                        </div>
                         <div className="mb-2 grid gap-2 md:grid-cols-2">
                           <input className="rounded-md border border-zinc-300 px-3 py-2 text-sm" placeholder="Title / Role / Degree" value={entry.title} onChange={(e) => updateEntry(section.id, entry.id, "title", e.target.value)} onBlur={() => normalizeEntryField(section.id, entry.id, "title")} />
                           <input className="rounded-md border border-zinc-300 px-3 py-2 text-sm" placeholder="Organization" value={entry.organization} onChange={(e) => updateEntry(section.id, entry.id, "organization", e.target.value)} onBlur={() => normalizeEntryField(section.id, entry.id, "organization")} />
@@ -840,12 +915,23 @@ export default function Home() {
                             </div>
                         ))}
                         <div className="mt-2 flex gap-2">
-                          <button className="rounded-md border border-zinc-300 px-2 py-1 text-xs font-medium hover:bg-white" onClick={() => addBullet(section.id, entry.id)}>Add Bullet</button>
-                          <button className="rounded-md border border-red-300 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50" onClick={() => deleteEntry(section.id, entry.id)}>Delete Entry</button>
+                          <button
+                            className="rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs font-medium hover:bg-zinc-100"
+                            onClick={() => addBullet(section.id, entry.id)}
+                          >
+                            Add Bullet in This {section.label}
+                          </button>
+                          <button
+                            className="rounded-md border border-red-300 bg-red-50 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100"
+                            onClick={() => deleteEntry(section.id, entry.id)}
+                          >
+                            Delete This {section.label}
+                          </button>
                         </div>
                       </div>
                     ))}
-                  </div>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -853,7 +939,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="print-only-resume h-[calc(100vh-100px)] overflow-auto rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
+        <section className="print-only-resume h-auto overflow-auto rounded-lg border border-zinc-200 bg-white p-4 shadow-sm lg:h-[calc(100vh-100px)]">
           <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">Live Resume Preview</h2>
           <div
             ref={previewRef}
