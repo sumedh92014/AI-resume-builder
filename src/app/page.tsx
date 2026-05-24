@@ -111,7 +111,10 @@ type StoredDraft = {
   sections: SectionConfig[];
   resume: ResumeState;
   collapsedSections: Record<string, boolean>;
+  suggestedSections: SectionConfig[];
 };
+
+type EditorStepId = "header" | SectionId;
 
 function loadDraftFromStorage(): StoredDraft {
   if (typeof window === "undefined") {
@@ -119,6 +122,7 @@ function loadDraftFromStorage(): StoredDraft {
       sections: initialSections,
       resume: initialResume,
       collapsedSections: {},
+      suggestedSections: [],
     };
   }
 
@@ -128,6 +132,7 @@ function loadDraftFromStorage(): StoredDraft {
       sections: initialSections,
       resume: initialResume,
       collapsedSections: {},
+      suggestedSections: [],
     };
   }
 
@@ -139,12 +144,14 @@ function loadDraftFromStorage(): StoredDraft {
         ? { ...parsed.resume, customSections: parsed.resume.customSections || {} }
         : initialResume,
       collapsedSections: parsed.collapsedSections || {},
+      suggestedSections: parsed.suggestedSections || [],
     };
   } catch {
     return {
       sections: initialSections,
       resume: initialResume,
       collapsedSections: {},
+      suggestedSections: [],
     };
   }
 }
@@ -223,6 +230,12 @@ export default function Home() {
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(
     () => loadDraftFromStorage().collapsedSections,
   );
+  const [collapsedEntries, setCollapsedEntries] = useState<Record<string, boolean>>({});
+  const [pendingDeleteSectionId, setPendingDeleteSectionId] = useState<SectionId | null>(null);
+  const [suggestedSections, setSuggestedSections] = useState<SectionConfig[]>(
+    () => loadDraftFromStorage().suggestedSections,
+  );
+  const [activeEditorStep, setActiveEditorStep] = useState<EditorStepId>("header");
   const previewRef = useRef<HTMLDivElement | null>(null);
   const bulletRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
@@ -250,13 +263,16 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ sections, resume, collapsedSections }));
-  }, [sections, resume, collapsedSections]);
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ sections, resume, collapsedSections, suggestedSections }),
+    );
+  }, [sections, resume, collapsedSections, suggestedSections]);
 
   const saveDraftNow = () => {
     localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ sections, resume, collapsedSections }),
+      JSON.stringify({ sections, resume, collapsedSections, suggestedSections }),
     );
     const now = new Date();
     setSaveMessage(`Saved at ${now.toLocaleTimeString()}`);
@@ -270,6 +286,24 @@ export default function Home() {
     (section): section is ContentSectionConfig => section.id !== "skills",
   );
   const enabledSections = sections.filter((section) => section.enabled);
+  const guidedSteps = useMemo<EditorStepId[]>(
+    () => ["header", ...enabledSections.map((section) => section.id)],
+    [enabledSections],
+  );
+  const activeStepIndex = Math.max(0, guidedSteps.indexOf(activeEditorStep));
+  const canGoBack = activeStepIndex > 0;
+  const canGoNext = activeStepIndex < guidedSteps.length - 1;
+  const flowProgressPercent = guidedSteps.length
+    ? Math.round(((activeStepIndex + 1) / guidedSteps.length) * 100)
+    : 0;
+  const isNearCompletion = flowProgressPercent >= 80 || !canGoNext;
+  const nextStepId = canGoNext ? guidedSteps[activeStepIndex + 1] : null;
+  const nextStepLabel =
+    nextStepId === null
+      ? "Done"
+      : nextStepId === "header"
+        ? "Header"
+        : sections.find((section) => section.id === nextStepId)?.label || "Next";
 
   const fullness = useMemo(() => {
     const base = 20;
@@ -375,38 +409,71 @@ export default function Home() {
     setCustomSectionName("");
   };
 
+  const addSuggestedSectionBack = (sectionId: SectionId) => {
+    const suggestion = suggestedSections.find((section) => section.id === sectionId);
+    if (!suggestion) return;
+
+    setSuggestedSections((prev) => prev.filter((section) => section.id !== sectionId));
+    setSections((prev) => [...prev, { ...suggestion, enabled: true }]);
+
+    if (sectionId === "skills") return;
+
+    setResume((prev) => {
+      if (sectionId.startsWith("custom-")) {
+        const existing = prev.customSections[sectionId] || [];
+        if (existing.length > 0) return prev;
+        return {
+          ...prev,
+          customSections: {
+            ...prev.customSections,
+            [sectionId]: [emptyEntry(`${sectionId}-${Date.now()}`)],
+          },
+        };
+      }
+
+      const key = sectionId as BaseContentSectionId;
+      const existing = prev[key];
+      if (existing.length > 0) return prev;
+      return { ...prev, [key]: [emptyEntry(`${key}-${Date.now()}`)] };
+    });
+  };
+
   const deleteSection = (sectionId: SectionId) => {
     const sectionMeta = sections.find((section) => section.id === sectionId);
     const label = sectionMeta?.label || "this section";
-    const isCustomSection = sectionId.startsWith("custom-");
-    const confirmed = window.confirm(
-      isCustomSection
-        ? `Delete "${label}" section and all its entries? This cannot be undone.`
-        : `Disable and clear "${label}" section content? This cannot be undone.`,
+    if (!label) return;
+
+    setSections((prev) => prev.filter((section) => section.id !== sectionId));
+    setCollapsedSections((prev) => {
+      const next = { ...prev };
+      delete next[sectionId];
+      return next;
+    });
+    setSuggestedSections((prev) =>
+      prev.some((section) => section.id === sectionId)
+        ? prev
+        : [...prev, { id: sectionId, label, enabled: false }],
     );
-    if (!confirmed) return;
 
     if (sectionId.startsWith("custom-")) {
-      setSections((prev) => prev.filter((section) => section.id !== sectionId));
       setResume((prev) => {
         const nextCustom = { ...prev.customSections };
         delete nextCustom[sectionId];
         return { ...prev, customSections: nextCustom };
       });
-      return;
-    }
-
-    setSections((prev) =>
-      prev.map((section) => (section.id === sectionId ? { ...section, enabled: false } : section)),
-    );
-
-    if (sectionId === "skills") {
+    } else if (sectionId === "skills") {
       setResume((prev) => ({ ...prev, skills: "" }));
-      return;
+    } else {
+      setResume((prev) => ({ ...prev, [sectionId as BaseContentSectionId]: [] }));
     }
-
-    setResume((prev) => ({ ...prev, [sectionId]: [] }));
+    setPendingDeleteSectionId(null);
   };
+
+  useEffect(() => {
+    if (!guidedSteps.includes(activeEditorStep)) {
+      setActiveEditorStep("header");
+    }
+  }, [guidedSteps, activeEditorStep]);
 
   const addEntry = (sectionId: ContentSectionId) =>
     setEntries(sectionId, [...getEntries(sectionId), emptyEntry(`${sectionId}-${Date.now()}`)]);
@@ -630,87 +697,163 @@ const data = (await response.json()) as BulletApiResult;
     return `${entryCount} entr${entryCount === 1 ? "y" : "ies"} and ${bulletCount} bullet point${bulletCount === 1 ? "" : "s"}.`;
   };
 
+  const getEntrySummary = (entry: ResumeEntry) => {
+    const title = entry.title?.trim() || "Untitled";
+    const org = entry.organization?.trim();
+    const bullets = entry.bullets.filter((b) => stripHtml(b).trim().length > 0).length;
+    return `${org ? `${title} • ${org}` : title} • ${bullets} bullets`;
+  };
+
+  const getSectionBadge = (section: SectionConfig) => {
+    if (section.id === "skills") {
+      const count = resume.skills
+        .split("|")
+        .map((item) => item.trim())
+        .filter(Boolean).length;
+      return `${count} skills`;
+    }
+    const entries = getEntries(section.id as ContentSectionId);
+    const bullets = entries.reduce(
+      (total, entry) => total + entry.bullets.filter((b) => stripHtml(b).trim().length > 0).length,
+      0,
+    );
+    return `${entries.length} entries • ${bullets} bullets`;
+  };
+
+  const isHeaderStarted =
+    resume.header.fullName.trim().length > 0 ||
+    resume.header.email.trim().length > 0 ||
+    resume.header.phone.trim().length > 0;
+  const isHeaderDone =
+    resume.header.fullName.trim().length > 0 &&
+    (resume.header.email.trim().length > 0 || resume.header.phone.trim().length > 0);
+
+  const getSectionProgress = (section: SectionConfig) => {
+    if (section.id === "skills") {
+      const count = resume.skills
+        .split("|")
+        .map((item) => item.trim())
+        .filter(Boolean).length;
+      if (count === 0) return "Not started";
+      if (count < 3) return "In progress";
+      return "Done";
+    }
+    const entries = getEntries(section.id as ContentSectionId);
+    const hasContent = entries.some(
+      (entry) =>
+        entry.title.trim().length > 0 ||
+        entry.organization.trim().length > 0 ||
+        entry.bullets.some((b) => stripHtml(b).trim().length > 0),
+    );
+    if (!hasContent) return "Not started";
+    const completeEntries = entries.filter(
+      (entry) =>
+        entry.title.trim().length > 0 &&
+        entry.bullets.some((b) => stripHtml(b).trim().length > 0),
+    ).length;
+    if (completeEntries === entries.length && entries.length > 0) return "Done";
+    return "In progress";
+  };
+
   if (!mounted) return null;
 
   return (
-    <div className="min-h-screen bg-zinc-100 text-zinc-900">
-      <header className="print-hidden sticky top-0 z-20 border-b border-zinc-200 bg-white/95 shadow-sm backdrop-blur">
-        <div className="mx-auto flex w-full max-w-[1880px] flex-col gap-3 px-3 py-3 lg:flex-row lg:items-center lg:justify-between">
+    <div className="min-h-screen bg-[#fafafa] text-zinc-900">
+      <header className="print-hidden sticky top-0 z-20 border-b border-zinc-200 bg-white/95 backdrop-blur">
+        <div className="mx-auto flex w-full max-w-[1880px] flex-col gap-3 px-3 py-3">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="space-y-0.5">
-            <h1 className="text-lg font-semibold tracking-tight">One-Page ATS Resume Builder</h1>
+            <h1 className="text-lg font-semibold tracking-tight text-zinc-900">One-Page ATS Resume Builder</h1>
             <p className="text-xs text-zinc-500">Single template. One page. Recruiter-ready.</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <span className={`rounded-md px-3 py-1.5 text-xs font-semibold ${fitStatus.tone}`}>
+            <span className={`rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-semibold ${fitStatus.tone}`}>
               {fitStatus.label}: {fullness}%
             </span>
+            {!isNearCompletion && canGoNext ? (
+              <button
+                className="rounded-md bg-zinc-900 px-3 py-2 text-xs font-semibold text-white hover:bg-zinc-800"
+                onClick={() => setActiveEditorStep(guidedSteps[activeStepIndex + 1])}
+              >
+                Continue: {nextStepLabel}
+              </button>
+            ) : null}
             <button
-              className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-xs font-medium hover:bg-zinc-100"
+              className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-100"
               onClick={saveDraftNow}
             >
               Save
             </button>
             <button
-              className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-xs font-medium hover:bg-zinc-100"
-              onClick={makeItFitOnePage}
-            >
-              Make It Fit
-            </button>
-            <button
-              className="rounded-md bg-zinc-900 px-3 py-2 text-xs font-semibold text-white hover:bg-zinc-800"
-              onClick={runPreExportChecks}
-            >
-              Run Export Checks
-            </button>
-            <label className="ml-1 flex items-center gap-2 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-xs text-zinc-600">
-              Header Color
-              <input
-                type="color"
-                value={sectionHeaderColor}
-                onChange={(e) => setSectionHeaderColor(e.target.value)}
-                className="h-5 w-7 cursor-pointer border-0 bg-transparent p-0"
-              />
-            </label>
-            <div className="ml-1 flex items-center gap-1 rounded-md border border-zinc-300 bg-white p-1">
-              <button
-                className="rounded px-2 py-1 text-xs font-semibold hover:bg-zinc-100"
-                onClick={() => setPreviewScale((prev) => Math.max(0.8, Number((prev - 0.05).toFixed(2))))}
-              >
-                -
-              </button>
-              <span className="px-1 text-[11px] text-zinc-600">
-                {Math.round(previewScale * 100)}%
-              </span>
-              <button
-                className="rounded px-2 py-1 text-xs font-semibold hover:bg-zinc-100"
-                onClick={() => setPreviewScale((prev) => Math.min(1.35, Number((prev + 0.05).toFixed(2))))}
-              >
-                +
-              </button>
-            </div>
-            <button
-              className="rounded-md bg-black px-3 py-2 text-xs font-semibold text-white hover:bg-zinc-800"
+              className={`rounded-md px-3 py-2 text-xs font-semibold text-white ${
+                isNearCompletion ? "bg-black hover:bg-zinc-800" : "bg-zinc-600 hover:bg-zinc-700"
+              }`}
               onClick={exportToPdf}
             >
-              Export PDF
+              {isNearCompletion ? "Export PDF" : "Export (When Ready)"}
             </button>
+          </div>
+          </div>
+          <div className="hidden items-center justify-between rounded-md border border-zinc-200 bg-zinc-50/70 px-3 py-2 text-xs text-zinc-600 lg:flex">
+            <div className="flex items-center gap-2">
+              <button
+                className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium hover:bg-zinc-100"
+                onClick={makeItFitOnePage}
+              >
+                Make It Fit
+              </button>
+              <button
+                className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium hover:bg-zinc-100"
+                onClick={runPreExportChecks}
+              >
+                Run Checks
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-2 rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs text-zinc-600">
+                Header Color
+                <input
+                  type="color"
+                  value={sectionHeaderColor}
+                  onChange={(e) => setSectionHeaderColor(e.target.value)}
+                  className="h-5 w-7 cursor-pointer border-0 bg-transparent p-0"
+                />
+              </label>
+              <div className="flex items-center gap-1 rounded-md border border-zinc-300 bg-white p-1">
+                <button
+                  className="rounded px-2 py-1 text-xs font-semibold hover:bg-zinc-100"
+                  onClick={() => setPreviewScale((prev) => Math.max(0.8, Number((prev - 0.05).toFixed(2))))}
+                >
+                  -
+                </button>
+                <span className="px-1 text-[11px] text-zinc-600">
+                  {Math.round(previewScale * 100)}%
+                </span>
+                <button
+                  className="rounded px-2 py-1 text-xs font-semibold hover:bg-zinc-100"
+                  onClick={() => setPreviewScale((prev) => Math.min(1.35, Number((prev + 0.05).toFixed(2))))}
+                >
+                  +
+                </button>
+              </div>
+            </div>
           </div>
         </div>
         {guardrailMessage ? (
-          <div className="mx-auto w-full max-w-[1880px] border-t border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-700">
+          <div className="mx-auto w-full max-w-[1880px] border-t border-zinc-200 bg-zinc-50/80 px-3 py-2 text-xs text-zinc-700">
             {guardrailMessage}
           </div>
         ) : null}
         {saveMessage ? (
-          <div className="mx-auto w-full max-w-[1880px] border-t border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-700">
+          <div className="mx-auto w-full max-w-[1880px] border-t border-zinc-200 bg-zinc-50/80 px-3 py-2 text-xs text-zinc-700">
             {saveMessage}
           </div>
         ) : null}
       </header>
 
-      <main className="print-root mx-auto grid w-full max-w-[1880px] gap-3 px-3 py-4 lg:grid-cols-[300px_minmax(520px,1fr)_minmax(560px,1fr)]">
-        <aside className="print-hidden h-auto w-full overflow-auto rounded-lg border border-zinc-200 bg-white p-4 shadow-sm lg:h-[calc(100vh-100px)] lg:w-[300px] lg:min-w-[300px] lg:max-w-[300px]">
-          <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">Section Manager</h2>
+      <main className="print-root mx-auto grid w-full max-w-[1880px] gap-3 px-3 py-3 lg:grid-cols-[300px_minmax(520px,1fr)_minmax(560px,1fr)]">
+        <aside className="print-hidden h-auto w-full overflow-auto rounded-lg border border-zinc-200 bg-[#fcfcfc] p-4 lg:h-[calc(100vh-94px)] lg:w-[300px] lg:min-w-[300px] lg:max-w-[300px]">
+          <h2 className="mb-3 text-[11px] font-semibold tracking-wide text-zinc-500">SECTION MANAGER</h2>
           <div className="space-y-2">
             {sections.map((section) => (
               <div
@@ -723,36 +866,69 @@ const data = (await response.json()) as BulletApiResult;
                   setDraggingSectionId(null);
                 }}
                 onDragEnd={() => setDraggingSectionId(null)}
-                className={`flex cursor-move items-center justify-between rounded-lg border px-3 py-2 text-sm transition ${
+                className={`flex cursor-move items-center justify-between rounded-md border px-3 py-2 text-sm transition ${
                   draggingSectionId === section.id
-                    ? "border-cyan-500 bg-cyan-50"
-                    : "border-zinc-200 bg-white hover:border-zinc-300 hover:bg-zinc-50"
+                    ? "border-zinc-900 bg-zinc-100"
+                    : "border-zinc-200 bg-white hover:border-zinc-300"
                 }`}
               >
-                <label className="flex items-center gap-2">
+                <label className="flex min-w-0 items-center gap-2">
                   <input
                     type="checkbox"
                     checked={section.enabled}
                     onChange={() => toggleSection(section.id)}
                     className="h-4 w-4 accent-zinc-900"
                   />
-                  <span>{section.label}</span>
+                  <div className="flex min-w-0 flex-col">
+                    <span className="truncate text-[13px]">{section.label}</span>
+                    <span className="text-[10px] text-zinc-500">{getSectionBadge(section)}</span>
+                  </div>
                 </label>
                 <div className="flex items-center gap-2">
-                  <button
-                    className="rounded border border-red-300 px-1.5 py-0.5 text-xs font-semibold text-red-700 hover:bg-red-50"
-                    onClick={() => deleteSection(section.id)}
-                    title="Delete section"
-                    aria-label="Delete section"
+                  <span className="cursor-grab select-none text-xs text-zinc-400" aria-hidden>
+                    ⋮⋮
+                  </span>
+                  <div
+                    className={`flex items-center gap-1 transition-all duration-200 ${
+                      pendingDeleteSectionId === section.id ? "-translate-x-1" : "translate-x-0"
+                    }`}
                   >
-                    ×
-                  </button>
+                    {pendingDeleteSectionId === section.id ? (
+                      <>
+                        <button
+                          className="rounded border border-zinc-300 px-1.5 py-0.5 text-xs font-semibold text-zinc-600 hover:bg-zinc-100"
+                          onClick={() => setPendingDeleteSectionId(null)}
+                          title="Cancel delete"
+                          aria-label="Cancel delete"
+                        >
+                          ×
+                        </button>
+                        <button
+                          className="rounded border border-emerald-300 px-1.5 py-0.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+                          onClick={() => deleteSection(section.id)}
+                          title="Confirm delete"
+                          aria-label="Confirm delete"
+                        >
+                          ✓
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        className="rounded border border-zinc-300 px-1.5 py-0.5 text-xs font-semibold text-zinc-600 hover:bg-zinc-100"
+                        onClick={() => setPendingDeleteSectionId(section.id)}
+                        title="Delete section"
+                        aria-label="Delete section"
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             ))}
           </div>
           <div className="mt-4 border-t border-zinc-200 pt-4">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+            <p className="mb-2 text-[11px] font-semibold tracking-wide text-zinc-500">
               Add Custom Section
             </p>
             <input
@@ -767,39 +943,116 @@ const data = (await response.json()) as BulletApiResult;
             >
               Add Section
             </button>
+            {suggestedSections.length > 0 ? (
+              <div className="mt-3 space-y-2">
+                <p className="text-[11px] font-semibold tracking-wide text-zinc-500">Recently Removed</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {suggestedSections.map((section) => (
+                    <button
+                      key={`suggested-${section.id}`}
+                      className="rounded border border-zinc-300 bg-white px-2 py-1 text-[11px] text-zinc-700 hover:bg-zinc-100"
+                      onClick={() => addSuggestedSectionBack(section.id)}
+                    >
+                      Restore {section.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
         </aside>
 
-        <section className="print-hidden h-auto overflow-auto rounded-lg border border-zinc-200 bg-white p-4 shadow-sm lg:h-[calc(100vh-100px)]">
-          <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">Input Editor</h2>
+        <section className="print-hidden h-auto overflow-auto rounded-lg border border-zinc-200 bg-white p-4 lg:h-[calc(100vh-94px)]">
+          <h2 className="mb-3 text-[11px] font-semibold tracking-wide text-zinc-500">INPUT EDITOR</h2>
           {overflowPercent > 0 ? (
             <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-800">
               Resume is {fullness}% full. Reduce {overflowBullets} bullets, especially in{" "}
               {topOverflowSections.map((s) => s.label).join(" and ") || "long sections"}.
             </div>
           ) : (
-            <div className="mb-4 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800">
+            <div className="mb-4 rounded-md border border-emerald-200 bg-emerald-50/70 p-3 text-xs text-emerald-800">
               Great fit. Your resume currently fits in one page.
             </div>
           )}
 
           <div className="mb-6 space-y-3 border-b border-zinc-200 pb-5">
-            <h3 className="text-sm font-semibold tracking-tight">Header</h3>
-            <div className="grid gap-2 md:grid-cols-2">
-              {([["fullName", "Full Name"], ["email", "Email"], ["phone", "Phone"], ["linkedin", "LinkedIn"], ["location", "Location"]] as const).map(([field, label]) => (
-                <label key={field} className="text-xs">
-                  <span className="mb-1 block text-zinc-600">{label}</span>
-                  <input
-                    className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none ring-zinc-900/10 placeholder:text-zinc-400 focus:ring-2"
-                    value={resume.header[field]}
-                    onChange={(e) =>
-                      setResume((prev) => ({
-                        ...prev,
-                        header: { ...prev.header, [field]: e.target.value },
-                      }))
-                    }
-                  />
-                </label>
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="text-sm font-semibold tracking-tight">Header</h3>
+              <span className="rounded border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] text-zinc-600">
+                {isHeaderDone ? "Done" : isHeaderStarted ? "In progress" : "Not started"}
+              </span>
+            </div>
+            {activeEditorStep === "header" ? (
+              <div className="grid gap-2 md:grid-cols-2">
+                {([["fullName", "Full Name"], ["email", "Email"], ["phone", "Phone"], ["linkedin", "LinkedIn"], ["location", "Location"]] as const).map(([field, label]) => (
+                  <label key={field} className="text-xs">
+                    <span className="mb-1 block text-zinc-500">{label}</span>
+                    <input
+                      className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-zinc-900/10 placeholder:text-zinc-400 focus:border-zinc-400 focus:ring-2"
+                      value={resume.header[field]}
+                      onChange={(e) =>
+                        setResume((prev) => ({
+                          ...prev,
+                          header: { ...prev.header, [field]: e.target.value },
+                        }))
+                      }
+                    />
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-md border border-dashed border-zinc-300 bg-zinc-50/80 px-3 py-2 text-xs text-zinc-600">
+                {resume.header.fullName || "Your Name"} • {resume.header.email || "Email"} • {resume.header.phone || "Phone"}
+              </div>
+            )}
+          </div>
+
+          <div className="mb-4 rounded-md border border-zinc-200 bg-zinc-50/60 px-3 py-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs text-zinc-600">
+                <span className="font-medium text-zinc-800">
+                  Step {activeStepIndex + 1} of {guidedSteps.length}
+                </span>
+                <span>{flowProgressPercent}% complete</span>
+              </div>
+              <select
+                className="rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs text-zinc-700"
+                value={activeEditorStep}
+                onChange={(e) => setActiveEditorStep(e.target.value as EditorStepId)}
+              >
+                {guidedSteps.map((step) => {
+                  if (step === "header") {
+                    const status = isHeaderDone ? "Done" : isHeaderStarted ? "In progress" : "Not started";
+                    return (
+                      <option key="jump-header" value="header">
+                        Header ({status})
+                      </option>
+                    );
+                  }
+                  const section = sections.find((s) => s.id === step);
+                  if (!section) return null;
+                  return (
+                    <option key={`jump-${step}`} value={step}>
+                      {section.label} ({getSectionProgress(section)})
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
+            <div className="mt-2 flex items-center gap-1.5">
+              {guidedSteps.map((step, index) => (
+                <button
+                  key={`rail-${step}`}
+                  className={`h-1.5 flex-1 rounded-full transition ${
+                    index < activeStepIndex
+                      ? "bg-zinc-900"
+                      : index === activeStepIndex
+                        ? "bg-zinc-500"
+                        : "bg-zinc-200"
+                  }`}
+                  onClick={() => setActiveEditorStep(step)}
+                  aria-label={`Go to step ${index + 1}`}
+                />
               ))}
             </div>
           </div>
@@ -809,11 +1062,25 @@ const data = (await response.json()) as BulletApiResult;
               if (!section.enabled) return null;
               const entries = getEntries(section.id);
               const aiEnabled = aiSupportedSections.includes(section.id as BaseSectionId);
+              const isActiveStep = activeEditorStep === section.id;
               return (
                 <div key={section.id} className="border-b border-zinc-200 pb-4">
-                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2">
-                    <h3 className="text-sm font-semibold text-zinc-900">{section.label}</h3>
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-200 bg-zinc-50/70 px-3 py-2">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm font-semibold text-zinc-900">{section.label}</h3>
+                      <span className="rounded border border-zinc-200 bg-white px-1.5 py-0.5 text-[10px] text-zinc-600">
+                        {getSectionProgress(section)}
+                      </span>
+                    </div>
                     <div className="flex flex-wrap items-center gap-2">
+                      {!isActiveStep ? (
+                        <button
+                          className="rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs font-medium hover:bg-zinc-100"
+                          onClick={() => setActiveEditorStep(section.id)}
+                        >
+                          Edit Section
+                        </button>
+                      ) : null}
                       <button
                         className="rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs font-medium hover:bg-zinc-100"
                         onClick={() => toggleSectionCollapse(section.id)}
@@ -828,23 +1095,46 @@ const data = (await response.json()) as BulletApiResult;
                       </button>
                     </div>
                   </div>
-                  {collapsedSections[section.id] ? (
-                    <div className="rounded-md border border-dashed border-zinc-300 bg-zinc-50 px-3 py-2 text-xs text-zinc-600">
+                  {!isActiveStep ? (
+                    <div className="rounded-md border border-dashed border-zinc-300 bg-zinc-50/80 px-3 py-2 text-xs text-zinc-600">
+                      {getCollapsedSummary(section, entries)}
+                    </div>
+                  ) : collapsedSections[section.id] ? (
+                    <div className="rounded-md border border-dashed border-zinc-300 bg-zinc-50/80 px-3 py-2 text-xs text-zinc-600">
                       {getCollapsedSummary(section, entries)}
                     </div>
                   ) : (
-                    <div className="space-y-4">
+                    <div className="space-y-3">
                     {entries.map((entry, entryIndex) => (
-                      <div key={entry.id} className="rounded-lg border border-zinc-300 bg-zinc-50/40 p-3 shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
-                        <div className="mb-2 flex flex-wrap items-center justify-between gap-1 rounded-md border border-zinc-200 bg-white px-2.5 py-1.5">
+                      <div key={entry.id} className="rounded-md border border-zinc-200 bg-white p-3">
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5">
                           <p className="text-xs font-semibold text-zinc-700">
                             {section.label} #{entryIndex + 1}
                           </p>
-                          <p className="text-[11px] text-zinc-500">Editing this block</p>
+                          <div className="flex items-center gap-2">
+                            <p className="text-[11px] text-zinc-500">{getEntrySummary(entry)}</p>
+                            <button
+                              className="rounded-md border border-zinc-300 bg-white px-2 py-1 text-[11px] font-medium text-zinc-600 hover:bg-zinc-100"
+                              onClick={() =>
+                                setCollapsedEntries((prev) => ({
+                                  ...prev,
+                                  [entry.id]: !prev[entry.id],
+                                }))
+                              }
+                            >
+                              {collapsedEntries[entry.id] ? "Expand" : "Collapse"}
+                            </button>
+                          </div>
                         </div>
+                        {collapsedEntries[entry.id] ? (
+                          <div className="rounded-md border border-dashed border-zinc-300 bg-zinc-50/80 px-3 py-2 text-xs text-zinc-600">
+                            {getEntrySummary(entry)}
+                          </div>
+                        ) : (
+                          <>
                         <div className="mb-2 grid gap-2 md:grid-cols-2">
-                          <input className="rounded-md border border-zinc-300 px-3 py-2 text-sm" placeholder="Title / Role / Degree" value={entry.title} onChange={(e) => updateEntry(section.id, entry.id, "title", e.target.value)} onBlur={() => normalizeEntryField(section.id, entry.id, "title")} />
-                          <input className="rounded-md border border-zinc-300 px-3 py-2 text-sm" placeholder="Organization" value={entry.organization} onChange={(e) => updateEntry(section.id, entry.id, "organization", e.target.value)} onBlur={() => normalizeEntryField(section.id, entry.id, "organization")} />
+                          <input className="rounded-md border border-zinc-300 px-3 py-2 text-sm placeholder:text-zinc-400" placeholder="Title / Role / Degree" value={entry.title} onChange={(e) => updateEntry(section.id, entry.id, "title", e.target.value)} onBlur={() => normalizeEntryField(section.id, entry.id, "title")} />
+                          <input className="rounded-md border border-zinc-300 px-3 py-2 text-sm placeholder:text-zinc-400" placeholder="Organization" value={entry.organization} onChange={(e) => updateEntry(section.id, entry.id, "organization", e.target.value)} onBlur={() => normalizeEntryField(section.id, entry.id, "organization")} />
                           {section.id !== "workExperience" ? (
                             <>
                               <input className="rounded-md border border-zinc-300 px-3 py-2 text-sm" placeholder="Start Date" value={entry.startDate} onChange={(e) => updateEntry(section.id, entry.id, "startDate", e.target.value)} />
@@ -909,7 +1199,7 @@ const data = (await response.json()) as BulletApiResult;
                           </div>
                         ) : null}
                         {aiEnabled ? (
-                          <div className="mb-2 space-y-2 rounded-md border border-zinc-200 bg-white p-2">
+                          <div className="mb-2 space-y-2 rounded-md border border-zinc-200 bg-zinc-50 p-2">
                             <textarea className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm" rows={3} placeholder="Rough notes for AI rewrite" value={entry.roughNotes || ""} onChange={(e) => updateEntry(section.id, entry.id, "roughNotes", e.target.value)} />
                             <button className="rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs font-medium hover:bg-zinc-50" onClick={() => generateBulletOptions(section.id, entry)}>{aiStateByEntry[entry.id]?.loading ? "Generating..." : "Generate AI Bullet Options"}</button>
                             {aiStateByEntry[entry.id]?.result ? (
@@ -983,15 +1273,17 @@ const data = (await response.json()) as BulletApiResult;
                             className="rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs font-medium hover:bg-zinc-100"
                             onClick={() => addBullet(section.id, entry.id)}
                           >
-                            Add Bullet in This {section.label}
+                            Add Bullet
                           </button>
                           <button
                             className="rounded-md border border-red-300 bg-red-50 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100"
                             onClick={() => deleteEntry(section.id, entry.id)}
                           >
-                            Delete This {section.label}
+                            Delete Entry
                           </button>
                         </div>
+                        </>
+                        )}
                       </div>
                     ))}
                     </div>
@@ -999,15 +1291,60 @@ const data = (await response.json()) as BulletApiResult;
                 </div>
               );
             })}
-            {sections.find((s) => s.id === "skills")?.enabled ? <div><h3 className="mb-2 text-sm font-semibold tracking-tight">Skills</h3><textarea className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm" rows={3} value={resume.skills} onChange={(e) => setResume((prev) => ({ ...prev, skills: e.target.value }))} /></div> : null}
+            {sections.find((s) => s.id === "skills")?.enabled ? (
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <h3 className="text-sm font-semibold tracking-tight">Skills</h3>
+                  <span className="rounded border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] text-zinc-600">
+                    {getSectionProgress(sections.find((s) => s.id === "skills")!)}
+                  </span>
+                </div>
+                {activeEditorStep === "skills" ? (
+                  <textarea
+                    className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm"
+                    rows={3}
+                    value={resume.skills}
+                    onChange={(e) => setResume((prev) => ({ ...prev, skills: e.target.value }))}
+                  />
+                ) : (
+                  <div className="rounded-md border border-dashed border-zinc-300 bg-zinc-50/80 px-3 py-2 text-xs text-zinc-600">
+                    {resume.skills.trim().length > 0 ? resume.skills : "No skills added yet."}
+                  </div>
+                )}
+              </div>
+            ) : null}
+          </div>
+          <div className="mt-5 flex items-center justify-between border-t border-zinc-200 pt-4">
+            <button
+              className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => canGoBack && setActiveEditorStep(guidedSteps[activeStepIndex - 1])}
+              disabled={!canGoBack}
+            >
+              Back
+            </button>
+            <p className="text-xs text-zinc-500">
+              Step {activeStepIndex + 1} of {guidedSteps.length}
+            </p>
+            <button
+              className="rounded-md border border-zinc-900 bg-zinc-900 px-3 py-2 text-xs font-semibold text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => {
+                if (canGoNext) {
+                  setActiveEditorStep(guidedSteps[activeStepIndex + 1]);
+                  return;
+                }
+                exportToPdf();
+              }}
+            >
+              {canGoNext ? `Next: ${nextStepLabel}` : "Export PDF"}
+            </button>
           </div>
         </section>
 
-        <section className="print-only-resume h-auto overflow-auto rounded-lg border border-zinc-200 bg-white p-4 shadow-sm lg:h-[calc(100vh-100px)]">
-          <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">Live Resume Preview</h2>
+        <section className="print-only-resume h-auto overflow-auto rounded-lg border border-zinc-200 bg-white p-4 lg:h-[calc(100vh-94px)]">
+          <h2 className="mb-3 text-[11px] font-semibold tracking-wide text-zinc-500">LIVE RESUME PREVIEW</h2>
           <div
             ref={previewRef}
-            className="print-preview-wrap mx-auto h-[842px] w-full overflow-hidden rounded-sm border border-zinc-300 bg-white px-8 py-7 shadow-[0_8px_30px_rgba(0,0,0,0.08)]"
+            className="print-preview-wrap mx-auto h-[842px] w-full overflow-hidden rounded-sm border border-zinc-300 bg-white px-8 py-7"
             style={{ maxWidth: `${Math.round(595 * previewScale)}px` }}
           >
             <div className="pb-2">
@@ -1069,6 +1406,37 @@ const data = (await response.json()) as BulletApiResult;
           </div>
         </section>
       </main>
+
+      <div className="print-hidden fixed inset-x-0 bottom-0 z-30 border-t border-zinc-200 bg-white/95 px-3 py-2 backdrop-blur lg:hidden">
+        <div className="mx-auto flex max-w-[1880px] items-center gap-2">
+          <button
+            className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-xs font-medium text-zinc-700"
+            onClick={saveDraftNow}
+          >
+            Save
+          </button>
+          <button
+            className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-xs font-medium"
+            onClick={runPreExportChecks}
+          >
+            Checks
+          </button>
+          <button
+            className={`ml-auto rounded-md px-3 py-2 text-xs font-semibold text-white ${
+              isNearCompletion ? "bg-black" : "bg-zinc-700"
+            }`}
+            onClick={() => {
+              if (canGoNext) {
+                setActiveEditorStep(guidedSteps[activeStepIndex + 1]);
+                return;
+              }
+              exportToPdf();
+            }}
+          >
+            {canGoNext ? "Next" : "Export PDF"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
